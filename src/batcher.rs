@@ -1,4 +1,5 @@
 
+use tch::{TchError, Tensor, kind::Kind, Device};
 
 struct TensorBatchingIterator {
     input: Box<dyn Iterator<(Tensor, Tensor)>>,
@@ -24,7 +25,13 @@ impl Iterator for TensorBatchingIterator {
             x_tensors.append(x_tensor);
             y_tensors.append(y_tensor);
 
-            mask_tensors.append()
+            mask_tensors.append(
+                Tensor.f_new_ones(
+                    x_tensor.shape(),
+                    Kind::Bool,
+                    Device::Cpu,
+                )
+            )
         }
     }
 

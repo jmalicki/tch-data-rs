@@ -1,4 +1,5 @@
-
+use core::hash::Hash;
+use num::{NumCast, ToPrimitive};
 use parquet::data_type::DataType;
 use parquet::{
     column::reader::ColumnReaderImpl,
@@ -7,26 +8,25 @@ use parquet::{
         reader::{FileReader, RowGroupReader, SerializedFileReader},
     },
 };
-use num::NumCast;
-use std::{fs::File, path::Path, usize};
+use std::cmp::Eq;
 use std::collections::HashMap;
+use std::{fs::File, path::Path, usize};
 use tch::{TchError, Tensor};
 use thiserror::Error;
-use core::hash::Hash;
-use std::cmp::Eq;
 
 // Keep track of iterator over parquet file
-struct ParquetToTorchSeqReaderIterator<ParquetValType>
-    where ParquetValType: DataType,
+struct ParquetToTorchSeqReaderRowGroup<ParquetValType>
+where
+    ParquetValType: DataType,
 {
     col_readers: Vec<Option<ColumnReaderImpl<ParquetValType>>>,
     row_group_num: usize,
     row_group_offset: usize,
     row_group_num_rows: usize,
-
 }
 
-pub type ParquetToTorchSeqReaderFactory = dyn Fn(&Path) -> Box<dyn ParquetToTorchSeqReader>;
+pub type ParquetToTorchSeqReaderFactory<Item> =
+    dyn Fn(&Path) -> Result<Box<dyn Iterator<Item = Item>>> + Send + Sync;
 
 pub trait ParquetToTorchSeqReader {
     fn get_tensors(&mut self) -> Result<Option<(Tensor, Tensor)>>;
@@ -34,37 +34,36 @@ pub trait ParquetToTorchSeqReader {
 }
 
 pub struct ParquetToTorchSeqReaderImpl<TensorValType, ParquetValType>
-    where
-      ParquetValType: DataType
+where
+    ParquetValType: DataType,
 {
     reader: SerializedFileReader<File>,
     col_indices: Vec<usize>,
     max_levels: Vec<i16>,
     num_row_groups: usize,
     max_seq_len: usize,
-    iter: ParquetToTorchSeqReaderIterator<ParquetValType>,
+    iter: ParquetToTorchSeqReaderRowGroup<ParquetValType>,
     // number of steps to skip between input and prediction
     forward_skips: usize,
     augment_offset: bool,
     last_rows: Vec<TensorValType>,
 }
 
-impl<ParquetValType: DataType> ParquetToTorchSeqReaderIterator<ParquetValType> {
+impl<ParquetValType: DataType> ParquetToTorchSeqReaderRowGroup<ParquetValType> {
     fn new(row_group_num: usize, num_cols: usize) -> Self {
-        ParquetToTorchSeqReaderIterator {
+        ParquetToTorchSeqReaderRowGroup {
             // row_group: None,
             row_group_num,
             row_group_num_rows: 0,
             row_group_offset: 0,
             col_readers: {
-                let mut  v = Vec::new();
+                let mut v = Vec::new();
                 v.resize_with(num_cols, || None);
                 v
             },
         }
     }
 }
-
 
 #[derive(Debug, Error)]
 pub enum ParquetLSTMTensorError {
@@ -83,14 +82,26 @@ pub enum ParquetLSTMTensorError {
     TryFromIntError(#[from] std::num::TryFromIntError),
 
     #[error(transparent)]
-    IoError(#[from] std::io::Error)
+    IoError(#[from] std::io::Error),
 }
 
-type Result<T> = core::result::Result<T, ParquetLSTMTensorError>;
+pub type Result<T> = core::result::Result<T, ParquetLSTMTensorError>;
+pub trait TensorValTypeTrait: tch::kind::Element + Default + NumCast {}
+impl<T> TensorValTypeTrait for T where T: tch::kind::Element + Default + NumCast {}
 
-impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<TensorValType, ParquetValType> where
-    TensorValType: tch::kind::Element + Default + NumCast,
-    ParquetValType::T: Copy + Default + NumCast {
+pub trait ParquetValTypeTrait: DataType {}
+impl<ValType> ParquetValTypeTrait for ValType
+where
+    ValType: DataType,
+    ValType::T: Copy + Default + NumCast + ToPrimitive,
+{
+}
+
+impl<TensorValType: TensorValTypeTrait, ParquetValType: ParquetValTypeTrait>
+    ParquetToTorchSeqReaderImpl<TensorValType, ParquetValType>
+where
+    ParquetValType::T: NumCast + ToPrimitive, // FIXME: why isn't ParquetValTypeTrait working here?
+{
     /// Return indices for given column names in parquet file
     ///
     /// # Arguments
@@ -102,7 +113,7 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
     /// List of indices of columns in same order as `colnames`
     fn column_indices_and_levels<StrRef: AsRef<str> + Hash + Eq>(
         metadata: &ParquetMetaData,
-        colnames: &[StrRef]
+        colnames: &[StrRef],
     ) -> Result<(Vec<usize>, Vec<i16>)> {
         let mut colmap = colnames
             .iter()
@@ -146,7 +157,8 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
         let reader = SerializedFileReader::new(f)?;
         let parquet_metadata = reader.metadata();
 
-        let (col_indices, max_levels) = Self::column_indices_and_levels(parquet_metadata, colnames)?;
+        let (col_indices, max_levels) =
+            Self::column_indices_and_levels(parquet_metadata, colnames)?;
         let num_row_groups = parquet_metadata.num_row_groups();
 
         let iter_info = Self::next_row_group(&reader, 0, num_row_groups, &col_indices)?;
@@ -164,12 +176,12 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
         };
 
         let mut last_rows = vec![TensorValType::default(); forward_skips * num_cols];
-    
+
         // If we couldn't read enough, we will be at eof
         let num_read = res.read_data(&mut last_rows, 0, forward_skips)?;
         // Have to move the vector so we don't double borrow
         res.last_rows = last_rows;
-    
+
         if num_read < forward_skips && !res.eof()? {
             panic!("Only read {num_read} values out of {forward_skips}, but eof not triggered, in init!")
         }
@@ -180,15 +192,18 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
     fn init_col_readers(
         row_group_reader: &dyn RowGroupReader,
         col_indices: &[usize],
-    ) -> Result<Vec<
-            Option<ColumnReaderImpl<ParquetValType>>
-    >> {
-        let readers = col_indices.iter().copied()
-            .map(|idx|
-                row_group_reader.get_column_reader(idx).map(
-                    |col_reader| Some(parquet::column::reader::get_typed_column_reader::<ParquetValType>(col_reader))
-                )
-            ).collect::<core::result::Result<Vec<_>, _>>()?;
+    ) -> Result<Vec<Option<ColumnReaderImpl<ParquetValType>>>> {
+        let readers = col_indices
+            .iter()
+            .copied()
+            .map(|idx| {
+                row_group_reader.get_column_reader(idx).map(|col_reader| {
+                    Some(parquet::column::reader::get_typed_column_reader::<
+                        ParquetValType,
+                    >(col_reader))
+                })
+            })
+            .collect::<core::result::Result<Vec<_>, _>>()?;
         Ok(readers)
     }
 
@@ -197,21 +212,22 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
         row_group_num: usize,
         num_row_groups: usize,
         col_indices: &[usize],
-    ) -> Result<ParquetToTorchSeqReaderIterator<ParquetValType>> {
+    ) -> Result<ParquetToTorchSeqReaderRowGroup<ParquetValType>> {
         if row_group_num >= num_row_groups {
-            Ok(ParquetToTorchSeqReaderIterator::new(row_group_num, col_indices.len()))
-
+            Ok(ParquetToTorchSeqReaderRowGroup::new(
+                row_group_num,
+                col_indices.len(),
+            ))
         } else {
             let row_group = reader.get_row_group(row_group_num)?;
             let row_group_num_rows = row_group.metadata().num_rows().try_into()?;
             let col_readers = Self::init_col_readers(&*row_group, col_indices)?;
 
-            Ok(ParquetToTorchSeqReaderIterator {
-                // row_group: Some(row_group),
+            Ok(ParquetToTorchSeqReaderRowGroup {
                 row_group_num,
                 row_group_num_rows,
                 row_group_offset: 0,
-                col_readers
+                col_readers,
             })
         }
     }
@@ -220,8 +236,8 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
         // check row group
         while self.iter.row_group_offset == self.iter.row_group_num_rows {
             panic!("Untested advance_row_groups");
-            if self.iter.row_group_num == self.num_row_groups { 
-                return Ok(())
+            if self.iter.row_group_num == self.num_row_groups {
+                return Ok(());
             }
 
             self.iter = Self::next_row_group(
@@ -235,7 +251,7 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
         Ok(())
     }
 
-    fn read_row_group_data (
+    fn read_row_group_data(
         &mut self,
         data: &mut [TensorValType],
         cur_offset: usize,
@@ -246,19 +262,24 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
         if seq_len * num_cols > data.len() {
             panic!(
                 "Data requested {data_req} larger than buffer {data_len}",
-                data_req=seq_len * num_cols, data_len=data.len(),
+                data_req = seq_len * num_cols,
+                data_len = data.len(),
             )
         }
 
         self.advance_row_groups()?;
-        if cur_offset > seq_len { panic!("offset {cur_offset} greater than sequence length {seq_len}") }
+        if cur_offset > seq_len {
+            panic!("offset {cur_offset} greater than sequence length {seq_len}")
+        }
 
         let num_rows: usize = core::cmp::min(
             seq_len - cur_offset,
             self.iter.row_group_num_rows - self.iter.row_group_offset,
         );
 
-        if num_rows == 0 { return Ok(0) } // EOF
+        if num_rows == 0 {
+            return Ok(0);
+        } // EOF
 
         let mut buffer: Vec<ParquetValType::T> = vec![ParquetValType::T::default(); num_rows];
         let mut def_levels: Vec<i16> = vec![0; num_rows];
@@ -266,13 +287,12 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
 
         for (col_idx, col_reader) in self.iter.col_readers.iter_mut().enumerate() {
             if let Some(reader) = col_reader.as_mut() {
-                let (non_null_read, levels_read) =
-                    reader.read_batch(
-                        num_rows,
-                        Some(&mut def_levels),
-                        Some(&mut rep_levels),
-                        &mut buffer,
-                    )?;
+                let (non_null_read, levels_read) = reader.read_batch(
+                    num_rows,
+                    Some(&mut def_levels),
+                    Some(&mut rep_levels),
+                    &mut buffer,
+                )?;
                 if levels_read != num_rows {
                     return Err(ParquetLSTMTensorError::ShortReadError);
                 }
@@ -284,20 +304,20 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
                 let mut src_idx: usize = 0;
                 let max_level = self.max_levels[col_idx];
 
-
                 // we have a level for every position, but a buffer in src_idx only for non-nulls
                 for dest_idx in 0..levels_read {
                     if def_levels[src_idx] == max_level {
-                        if src_idx < non_null_read {  // defensive if for later panic
+                        if src_idx < non_null_read {
+                            // defensive if for later panic
                             data[(cur_offset + dest_idx) * num_cols + col_idx] =
-                                num::cast(buffer[src_idx]).unwrap()
+                                num::cast(buffer[src_idx].clone()).unwrap()
                         }
                         src_idx += 1;
 
                         if src_idx > non_null_read {
                             panic!(
                                 "More non-null values ({src_idx}) than reported read {non_null_read}!"
-                            )    
+                            )
                         }
                     }
                 }
@@ -309,13 +329,20 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
         Ok(num_rows)
     }
 
-    pub fn read_data(&mut self, data: &mut [TensorValType], cur_offset: usize, seq_len: usize) -> Result<usize> {
+    pub fn read_data(
+        &mut self,
+        data: &mut [TensorValType],
+        cur_offset: usize,
+        seq_len: usize,
+    ) -> Result<usize> {
         let mut rows_read = 0;
 
         while cur_offset + rows_read < seq_len {
             let num_rows = self.read_row_group_data(data, cur_offset + rows_read, seq_len)?;
             rows_read += num_rows;
-            if num_rows == 0 { break; }
+            if num_rows == 0 {
+                break;
+            }
         }
 
         Ok(rows_read)
@@ -323,49 +350,47 @@ impl<TensorValType, ParquetValType: DataType> ParquetToTorchSeqReaderImpl<Tensor
 
     pub fn get_tensor_len(&mut self, seq_len: usize) -> Result<Option<(Tensor, Tensor)>> {
         let num_cols: usize = self.col_indices.len();
-        let mut data: Vec<TensorValType> = vec![TensorValType::default(); (self.forward_skips + seq_len) * num_cols];
+        let mut data: Vec<TensorValType> =
+            vec![TensorValType::default(); (self.forward_skips + seq_len) * num_cols];
 
-        data[..(num_cols*self.forward_skips)].clone_from_slice(&self.last_rows);
+        data[..(num_cols * self.forward_skips)].clone_from_slice(&self.last_rows);
 
         let mut cur_offset: usize = self.forward_skips;
-    
+
         let rows_read = self.read_data(&mut data, cur_offset, seq_len + self.forward_skips)?;
         cur_offset += rows_read;
 
         if cur_offset == self.forward_skips {
-            return Ok(None)
+            return Ok(None);
         }
 
-        let shape: [i64; 2] = [(seq_len + self.forward_skips).try_into()?, num_cols.try_into()?];
+        let shape: [i64; 2] = [
+            (seq_len + self.forward_skips).try_into()?,
+            num_cols.try_into()?,
+        ];
         let t = Tensor::from_slice(&data).view(shape);
 
         let return_seq_len = cur_offset - self.forward_skips;
-        let t_x = t.f_slice(
-            0,
-            Some(0),
-            Some(return_seq_len.try_into()?),
-            1,
-        )?;
+        let t_x = t.f_slice(0, Some(0), Some(return_seq_len.try_into()?), 1)?;
         let t_y = t.f_slice(
             0,
             Some(self.forward_skips.try_into()?),
-            Some((return_seq_len+self.forward_skips).try_into()?),
+            Some((return_seq_len + self.forward_skips).try_into()?),
             1,
         )?;
 
-        self.last_rows.clone_from_slice(
-            &data[(data.len() - num_cols * self.forward_skips)..]);
+        self.last_rows
+            .clone_from_slice(&data[(data.len() - num_cols * self.forward_skips)..]);
 
         Ok(Some((t_x, t_y)))
     }
-
-
 }
 
-impl<TensorValType, ParquetValType> ParquetToTorchSeqReader for ParquetToTorchSeqReaderImpl<TensorValType, ParquetValType>
-  where ParquetValType: DataType,
-    TensorValType: tch::kind::Element + Default + NumCast,
-    ParquetValType::T: Copy + Default + NumCast {
+impl<TensorValType: TensorValTypeTrait, ParquetValType: ParquetValTypeTrait> ParquetToTorchSeqReader
+    for ParquetToTorchSeqReaderImpl<TensorValType, ParquetValType>
+where
+    ParquetValType::T: NumCast,
+{
     fn get_tensors(&mut self) -> Result<Option<(Tensor, Tensor)>> {
         self.get_tensor_len(self.max_seq_len)
     }
@@ -373,6 +398,21 @@ impl<TensorValType, ParquetValType> ParquetToTorchSeqReader for ParquetToTorchSe
     fn eof(&mut self) -> Result<bool> {
         self.advance_row_groups()?;
         return Ok(self.iter.row_group_num == self.num_row_groups);
+    }
+}
+
+impl<TensorValType: TensorValTypeTrait, ParquetValType: ParquetValTypeTrait> Iterator
+    for ParquetToTorchSeqReaderImpl<TensorValType, ParquetValType>
+where
+    ParquetValType::T: NumCast,
+{
+    type Item = (Tensor, Tensor);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.get_tensor_len(self.max_seq_len) {
+            Ok(tensors) => tensors,
+            Err(e) => panic!("Error in iterator: {e}"),
+        }
     }
 }
 
