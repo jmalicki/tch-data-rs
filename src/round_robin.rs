@@ -239,7 +239,7 @@ impl<Item> RoundRobin<Item> {
             filenames: filenames.iter().map(|s| PathBuf::from(s)).collect(),
             round_robin_size,
             buffer_size,
-            reader_create: reader_create,
+            reader_create,
         };
 
         Ok(res)
