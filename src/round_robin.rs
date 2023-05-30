@@ -222,7 +222,9 @@ impl<Item> Iterator for RoundRobinIterator<Item> {
 impl<Item> Drop for RoundRobinIterator<Item> {
     fn drop(&mut self) {
         for _i in 0..self.round_robin_size {
-            self.control_queue.send(ControlMessage::Stop).expect("Error sending stop message");
+            self.control_queue
+                .send(ControlMessage::Stop)
+                .expect("Error sending stop message");
         }
         self.threadpool.join();
     }
