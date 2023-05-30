@@ -18,7 +18,7 @@ use parquet_tensors::{
     ParquetLSTMSeqOptions, ParquetLSTMTensorError, ParquetToTorchSeqReaderFactory,
     ParquetToTorchSeqReaderImpl,
 };
-use round_robin::{RoundRobin, RoundRobinIterator};
+use round_robin::{RoundRobin, RoundRobinIterator, RoundRobinOptions};
 
 struct PyTensor(Tensor);
 
@@ -146,8 +146,10 @@ impl ParquetToTorchSeqRoundRobinFloat {
 
         match RoundRobin::<(Tensor, Tensor)>::new(
             &filenames,
-            round_robin_size,
-            buffer_size,
+            RoundRobinOptions {
+                round_robin_size,
+                buffer_size,
+            },
             reader_create,
         ) {
             Ok(reader) => Ok(ParquetToTorchSeqRoundRobinFloat { reader }),

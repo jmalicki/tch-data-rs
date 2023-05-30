@@ -15,6 +15,12 @@ enum WorkQueueMessage {
     NewFile(PathBuf),
 }
 
+#[derive(Clone)]
+pub struct RoundRobinOptions {
+    pub round_robin_size: usize,
+    pub buffer_size: usize,
+}
+
 #[derive(Debug, Error)]
 pub enum RoundRobinError {
     #[error(transparent)]
@@ -100,8 +106,7 @@ where
 }
 
 pub struct RoundRobin<Item> {
-    round_robin_size: usize,
-    buffer_size: usize,
+    options: RoundRobinOptions,
     filenames: Vec<PathBuf>,
     reader_create: Arc<ParquetToTorchSeqReaderFactory<Item>>,
 }
@@ -110,8 +115,7 @@ pub struct RoundRobin<Item> {
 impl<Item> Clone for RoundRobin<Item> {
     fn clone(&self) -> Self {
         RoundRobin {
-            round_robin_size: self.round_robin_size,
-            buffer_size: self.buffer_size,
+            options: self.options.clone(),
             filenames: self.filenames.clone(),
             reader_create: self.reader_create.clone(),
         }
@@ -131,14 +135,16 @@ pub struct RoundRobinIterator<Item> {
 
 impl<Item: Send + 'static> RoundRobinIterator<Item> {
     pub fn new(parent: &RoundRobin<Item>) -> Result<RoundRobinIterator<Item>> {
-        let threadpool = ThreadPool::new(parent.round_robin_size);
-        let mut item_queues = Vec::<Receiver<Option<Item>>>::with_capacity(parent.round_robin_size);
-        let (work_queue_sender, work_queue_receiver) = bounded(parent.round_robin_size);
-        let (control_queue_sender, control_queue_receiver) = bounded(parent.round_robin_size);
+        let threadpool = ThreadPool::new(parent.options.round_robin_size);
+        let mut item_queues =
+            Vec::<Receiver<Option<Item>>>::with_capacity(parent.options.round_robin_size);
+        let (work_queue_sender, work_queue_receiver) = bounded(parent.options.round_robin_size);
+        let (control_queue_sender, control_queue_receiver) =
+            bounded(parent.options.round_robin_size);
 
         let mut next_file = 0;
-        while next_file < parent.round_robin_size && next_file < parent.filenames.len() {
-            let (sender, receiver) = bounded::<Option<Item>>(parent.buffer_size);
+        while next_file < parent.options.round_robin_size && next_file < parent.filenames.len() {
+            let (sender, receiver) = bounded::<Option<Item>>(parent.options.buffer_size);
             item_queues.push(receiver);
 
             let mut worker = RoundRobinWorker {
@@ -160,7 +166,7 @@ impl<Item: Send + 'static> RoundRobinIterator<Item> {
         }
 
         Ok(RoundRobinIterator {
-            round_robin_size: parent.round_robin_size,
+            round_robin_size: parent.options.round_robin_size,
             next_file,
             next_queue: 0,
             item_queues,
@@ -233,14 +239,12 @@ impl<Item> Drop for RoundRobinIterator<Item> {
 impl<Item> RoundRobin<Item> {
     pub fn new<StrRef: AsRef<str> + std::convert::AsRef<std::ffi::OsStr>>(
         filenames: &[StrRef],
-        round_robin_size: usize,
-        buffer_size: usize,
+        options: RoundRobinOptions,
         reader_create: Arc<ParquetToTorchSeqReaderFactory<Item>>,
     ) -> Result<RoundRobin<Item>> {
         let res = RoundRobin {
             filenames: filenames.iter().map(|s| PathBuf::from(s)).collect(),
-            round_robin_size,
-            buffer_size,
+            options,
             reader_create,
         };
 

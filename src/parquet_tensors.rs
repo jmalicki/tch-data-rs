@@ -397,7 +397,7 @@ where
     ParquetValType::T: NumCast,
 {
     fn get_tensors(&mut self) -> Result<Option<(Tensor, Tensor)>> {
-        self.get_tensor_len(self.max_seq_len)
+        self.get_tensor_len(self.seq_options.max_seq_len)
     }
 
     fn eof(&mut self) -> Result<bool> {
@@ -414,10 +414,9 @@ where
     type Item = (Tensor, Tensor);
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.get_tensor_len(self.max_seq_len) {
+        match self.get_tensor_len(self.seq_options.max_seq_len) {
             Ok(tensors) => tensors,
             Err(e) => panic!("Error in iterator: {e}"),
         }
     }
 }
-
