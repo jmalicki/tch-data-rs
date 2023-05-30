@@ -138,10 +138,10 @@ impl ParquetToTorchBatchedRoundRobinFloat {
     }
 
     fn __iter__(&self) -> ParquetToTorchBatchedRoundRobinFloatIter {
-        let batcher = TensorBatchingIterator {
-            input: Box::new(self.round_robin.iter()),
-            batch_size: self.batch_size,
-        };
+        let batcher = TensorBatchingIterator::new(
+            Box::new(self.round_robin.iter()),
+            self.batch_size,
+        );
 
         ParquetToTorchBatchedRoundRobinFloatIter {
             iter: Mutex::new(batcher),

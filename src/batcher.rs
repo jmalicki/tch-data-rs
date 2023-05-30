@@ -5,8 +5,8 @@ use tch::{kind::Kind, Device, Tensor};
 use thiserror::Error;
 
 pub struct TensorBatchingIterator {
-    pub input: Box<dyn Iterator<Item = (Tensor, Tensor)> + Send>,
-    pub batch_size: usize,
+    input: Box<dyn Iterator<Item = (Tensor, Tensor)> + Send>,
+    batch_size: usize,
 }
 
 pub struct TensorBatchingItem {
@@ -28,6 +28,17 @@ enum BatchingError {
 }
 
 impl TensorBatchingIterator {
+
+    pub fn new(
+        input: Box<dyn Iterator<Item = (Tensor, Tensor)> + Send>,
+        batch_size: usize,
+    ) -> Self {
+        TensorBatchingIterator {
+            input,
+            batch_size,
+        }   
+    }
+
     // Make sure these differ only in first dimension
     // return size large enough for all
     fn check_dims(tensors: &[Tensor]) -> Result<Vec<i64>, BatchingError> {
@@ -46,6 +57,26 @@ impl TensorBatchingIterator {
         }
 
         return Ok(shape);
+    }
+
+    pub fn batch(batch: &[(Tensor, Tensor)]) -> TensorBatchingItem {
+        let mut x_tensors = Vec::with_capacity(batch.len());
+        let mut y_tensors = Vec::with_capacity(batch.len());
+        let mut mask_tensors = Vec::with_capacity(batch.len());
+
+        for (x, y) in batch {
+            let x_size = x.size();
+
+            x_tensors.push(x);
+            y_tensors.push(y);
+            mask_tensors.push(Tensor::ones(&x_size, (Kind::Bool, Device::Cpu)));
+        }
+
+        TensorBatchingItem {
+            x: Tensor::pad_sequence(&x_tensors, true, 0.0),
+            y: Tensor::pad_sequence(&y_tensors, true, 0.0),
+            mask: Tensor::pad_sequence(&mask_tensors, true, 0.0),
+        }
     }
 }
 
