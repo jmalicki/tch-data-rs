@@ -246,11 +246,8 @@ impl<Item> RoundRobin<Item> {
     }
 }
 
-impl<Item: Send + 'static> IntoIterator for &RoundRobin<Item> {
-    type Item = Item;
-    type IntoIter = RoundRobinIterator<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        Self::IntoIter::new(self).expect("Iterator creation error")
+impl<Item: Send + 'static> RoundRobin<Item> {
+    pub fn iter(&self) -> RoundRobinIterator<Item> {
+        RoundRobinIterator::<Item>::new(self).expect("Iterator creation error")
     }
 }

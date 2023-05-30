@@ -150,7 +150,7 @@ impl ParquetToTorchSeqRoundRobinFloat {
 
     fn __iter__(&self) -> PyResult<ParquetToTorchSeqRoundRobinFloatIter> {
         Ok(ParquetToTorchSeqRoundRobinFloatIter {
-            iter: Mutex::new(self.reader.into_iter()),
+            iter: Mutex::new(self.reader.iter()),
         })
     }
 }
