@@ -24,6 +24,7 @@ tch = { version = "0.13.0", features = ["python-extension"] }
 thiserror = "1.0"
 crossbeam-channel = "0.5"
 threadpool = "1.0"
+par-map = "0.1"
 
 [features]
 extension-module = ["pyo3/extension-module"]

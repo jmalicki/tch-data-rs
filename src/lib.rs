@@ -11,7 +11,7 @@ mod batcher;
 mod parquet_tensors;
 mod round_robin;
 
-use batcher::{TensorBatchingIterator, TensorBatchingItem};
+use batcher::{TensorBatchingItem, TensorBatchingIterator};
 use parquet::data_type::DoubleType;
 use tch::Tensor;
 
@@ -138,10 +138,8 @@ impl ParquetToTorchBatchedRoundRobinFloat {
     }
 
     fn __iter__(&self) -> ParquetToTorchBatchedRoundRobinFloatIter {
-        let batcher = TensorBatchingIterator::new(
-            Box::new(self.round_robin.iter()),
-            self.batch_size,
-        );
+        let batcher =
+            TensorBatchingIterator::new(Box::new(self.round_robin.iter()), self.batch_size);
 
         ParquetToTorchBatchedRoundRobinFloatIter {
             iter: Mutex::new(batcher),
@@ -149,10 +147,8 @@ impl ParquetToTorchBatchedRoundRobinFloat {
     }
 }
 
-
 #[pymethods]
 impl ParquetToTorchBatchedRoundRobinFloatIter {
-
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
