@@ -7,9 +7,11 @@ use pyo3::{
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use parquet::data_type::DoubleType;
+mod batcher;
 mod parquet_tensors;
 mod round_robin;
+
+use parquet::data_type::DoubleType;
 use tch::Tensor;
 
 use parquet_tensors::{
