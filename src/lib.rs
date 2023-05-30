@@ -15,7 +15,8 @@ use parquet::data_type::DoubleType;
 use tch::Tensor;
 
 use parquet_tensors::{
-    ParquetLSTMTensorError, ParquetToTorchSeqReaderFactory, ParquetToTorchSeqReaderImpl,
+    ParquetLSTMSeqOptions, ParquetLSTMTensorError, ParquetToTorchSeqReaderFactory,
+    ParquetToTorchSeqReaderImpl,
 };
 use round_robin::{RoundRobin, RoundRobinIterator};
 
@@ -92,9 +93,11 @@ impl ParquetToTorchSeqReaderFloat {
         match ParquetToTorchSeqReaderImpl::<f32, DoubleType>::new(
             path,
             &colnames,
-            max_seq_len,
-            forward_skips,
-            augment_offset,
+            ParquetLSTMSeqOptions {
+                max_seq_len,
+                forward_skips,
+                augment_offset,
+            },
         ) {
             Ok(reader) => Ok(ParquetToTorchSeqReaderFloat { reader }),
             Err(_e) => Err(PyErr::new::<PyException, _>("Error creating class")),
@@ -132,9 +135,11 @@ impl ParquetToTorchSeqRoundRobinFloat {
                     ParquetToTorchSeqReaderImpl::<f32, DoubleType>::new(
                         path,
                         &colnames,
-                        max_seq_len,
-                        forward_skips,
-                        augment_offset,
+                        ParquetLSTMSeqOptions {
+                            max_seq_len,
+                            forward_skips,
+                            augment_offset,
+                        },
                     )?,
                 ))
             });

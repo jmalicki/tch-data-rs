@@ -33,6 +33,13 @@ pub trait ParquetToTorchSeqReader {
     fn eof(&mut self) -> Result<bool>;
 }
 
+pub struct ParquetLSTMSeqOptions {
+    pub max_seq_len: usize,
+    // number of steps to skip between input and prediction
+    pub forward_skips: usize,
+    pub augment_offset: bool,
+}
+
 pub struct ParquetToTorchSeqReaderImpl<TensorValType, ParquetValType>
 where
     ParquetValType: DataType,
@@ -41,12 +48,9 @@ where
     col_indices: Vec<usize>,
     max_levels: Vec<i16>,
     num_row_groups: usize,
-    max_seq_len: usize,
     iter: ParquetToTorchSeqReaderRowGroup<ParquetValType>,
-    // number of steps to skip between input and prediction
-    forward_skips: usize,
-    augment_offset: bool,
     last_rows: Vec<TensorValType>,
+    seq_options: ParquetLSTMSeqOptions,
 }
 
 impl<ParquetValType: DataType> ParquetToTorchSeqReaderRowGroup<ParquetValType> {
@@ -147,9 +151,7 @@ where
     pub fn new<StrRef: AsRef<str> + Hash + Eq>(
         filename: &Path,
         colnames: &[StrRef],
-        max_seq_len: usize,
-        forward_skips: usize,
-        augment_offset: bool,
+        seq_options: ParquetLSTMSeqOptions,
     ) -> Result<Self> {
         let f = File::open(filename)?;
         let num_cols = colnames.len();
@@ -163,16 +165,15 @@ where
 
         let iter_info = Self::next_row_group(&reader, 0, num_row_groups, &col_indices)?;
 
+        let forward_skips = seq_options.forward_skips;
         let mut res = ParquetToTorchSeqReaderImpl {
             reader,
             num_row_groups,
             col_indices,
             max_levels,
             iter: iter_info,
-            max_seq_len,
-            forward_skips,
-            augment_offset,
             last_rows: Vec::new(),
+            seq_options,
         };
 
         let mut last_rows = vec![TensorValType::default(); forward_skips * num_cols];
@@ -351,36 +352,40 @@ where
     pub fn get_tensor_len(&mut self, seq_len: usize) -> Result<Option<(Tensor, Tensor)>> {
         let num_cols: usize = self.col_indices.len();
         let mut data: Vec<TensorValType> =
-            vec![TensorValType::default(); (self.forward_skips + seq_len) * num_cols];
+            vec![TensorValType::default(); (self.seq_options.forward_skips + seq_len) * num_cols];
 
-        data[..(num_cols * self.forward_skips)].clone_from_slice(&self.last_rows);
+        data[..(num_cols * self.seq_options.forward_skips)].clone_from_slice(&self.last_rows);
 
-        let mut cur_offset: usize = self.forward_skips;
+        let mut cur_offset: usize = self.seq_options.forward_skips;
 
-        let rows_read = self.read_data(&mut data, cur_offset, seq_len + self.forward_skips)?;
+        let rows_read = self.read_data(
+            &mut data,
+            cur_offset,
+            seq_len + self.seq_options.forward_skips,
+        )?;
         cur_offset += rows_read;
 
-        if cur_offset == self.forward_skips {
+        if cur_offset == self.seq_options.forward_skips {
             return Ok(None);
         }
 
         let shape: [i64; 2] = [
-            (seq_len + self.forward_skips).try_into()?,
+            (seq_len + self.seq_options.forward_skips).try_into()?,
             num_cols.try_into()?,
         ];
         let t = Tensor::from_slice(&data).view(shape);
 
-        let return_seq_len = cur_offset - self.forward_skips;
+        let return_seq_len = cur_offset - self.seq_options.forward_skips;
         let t_x = t.f_slice(0, Some(0), Some(return_seq_len.try_into()?), 1)?;
         let t_y = t.f_slice(
             0,
-            Some(self.forward_skips.try_into()?),
-            Some((return_seq_len + self.forward_skips).try_into()?),
+            Some(self.seq_options.forward_skips.try_into()?),
+            Some((return_seq_len + self.seq_options.forward_skips).try_into()?),
             1,
         )?;
 
         self.last_rows
-            .clone_from_slice(&data[(data.len() - num_cols * self.forward_skips)..]);
+            .clone_from_slice(&data[(data.len() - num_cols * self.seq_options.forward_skips)..]);
 
         Ok(Some((t_x, t_y)))
     }
