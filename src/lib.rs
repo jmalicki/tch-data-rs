@@ -11,7 +11,7 @@ mod batcher;
 mod parquet_tensors;
 mod round_robin;
 
-use batcher::TensorBatchingIterator;
+use batcher::{TensorBatchingIterator, TensorBatchingItem};
 use parquet::data_type::DoubleType;
 use tch::Tensor;
 
@@ -82,7 +82,13 @@ struct ParquetToTorchSeqRoundRobinFloatIter {
 
 #[pyclass(module = "parquet_lstm_tensor")]
 struct ParquetToTorchBatchedRoundRobinFloat {
-    batcher: Mutex<TensorBatchingIterator>,
+    round_robin: RoundRobin<(Tensor, Tensor)>,
+    batch_size: usize,
+}
+
+#[pyclass(module = "parquet_lstm_tensor")]
+struct ParquetToTorchBatchedRoundRobinFloatIter {
+    iter: Mutex<TensorBatchingIterator>,
 }
 
 #[pymethods]
@@ -125,15 +131,27 @@ impl ParquetToTorchBatchedRoundRobinFloat {
             Err(_e) => Err(PyErr::new::<PyException, _>("Error creating class")),
         }?;
 
-        let batcher = TensorBatchingIterator {
-            input: Box::new(round_robin.iter()),
-            batch_size,
-        };
-
         Ok(ParquetToTorchBatchedRoundRobinFloat {
-            batcher: Mutex::new(batcher),
+            round_robin,
+            batch_size,
         })
     }
+
+    fn __iter__(&self) -> ParquetToTorchBatchedRoundRobinFloatIter {
+        let batcher = TensorBatchingIterator {
+            input: Box::new(self.round_robin.iter()),
+            batch_size: self.batch_size,
+        };
+
+        ParquetToTorchBatchedRoundRobinFloatIter {
+            iter: Mutex::new(batcher),
+        }
+    }
+}
+
+
+#[pymethods]
+impl ParquetToTorchBatchedRoundRobinFloatIter {
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
@@ -144,7 +162,7 @@ impl ParquetToTorchBatchedRoundRobinFloat {
         py: Python<'_>,
     ) -> PyResult<IterNextOutput<(PyTensor, PyTensor, PyTensor), &'static str>> {
         match py.allow_threads(move || {
-            let mut iter = self.batcher.lock().expect("lock failed");
+            let mut iter = self.iter.lock().expect("lock failed");
             iter.next()
         }) {
             None => Ok(IterNextOutput::Return("Ended")),
