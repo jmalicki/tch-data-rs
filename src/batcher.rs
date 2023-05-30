@@ -4,15 +4,15 @@ use std::num::TryFromIntError;
 use tch::{kind::Kind, Device, Tensor};
 use thiserror::Error;
 
-struct TensorBatchingIterator {
-    input: Box<dyn Iterator<Item = (Tensor, Tensor)>>,
-    batch_size: usize,
+pub struct TensorBatchingIterator {
+    pub input: Box<dyn Iterator<Item = (Tensor, Tensor)> + Send>,
+    pub batch_size: usize,
 }
 
 pub struct TensorBatchingItem {
-    x: Tensor,
-    y: Tensor,
-    mask: Tensor,
+    pub x: Tensor,
+    pub y: Tensor,
+    pub mask: Tensor,
 }
 
 #[derive(Error, Debug)]

@@ -11,6 +11,7 @@ mod batcher;
 mod parquet_tensors;
 mod round_robin;
 
+use batcher::TensorBatchingIterator;
 use parquet::data_type::DoubleType;
 use tch::Tensor;
 
@@ -77,6 +78,83 @@ struct ParquetToTorchSeqRoundRobinFloat {
 #[pyclass(module = "parquet_lstm_tensor")]
 struct ParquetToTorchSeqRoundRobinFloatIter {
     iter: Mutex<RoundRobinIterator<(Tensor, Tensor)>>,
+}
+
+#[pyclass(module = "parquet_lstm_tensor")]
+struct ParquetToTorchBatchedRoundRobinFloat {
+    batcher: Mutex<TensorBatchingIterator>,
+}
+
+#[pymethods]
+impl ParquetToTorchBatchedRoundRobinFloat {
+    #[new]
+    fn __new__(
+        filenames: Vec<String>,
+        colnames: Vec<String>,
+        round_robin_size: usize,
+        buffer_size: usize,
+        max_seq_len: usize,
+        forward_skips: usize,
+        augment_offset: bool,
+        batch_size: usize,
+    ) -> PyResult<Self> {
+        let reader_create: Arc<ParquetToTorchSeqReaderFactory<(Tensor, Tensor)>> =
+            Arc::new(move |path: &Path| {
+                Ok(Box::new(
+                    ParquetToTorchSeqReaderImpl::<f32, DoubleType>::new(
+                        path,
+                        &colnames,
+                        ParquetLSTMSeqOptions {
+                            max_seq_len,
+                            forward_skips,
+                            augment_offset,
+                        },
+                    )?,
+                ))
+            });
+
+        let round_robin = match RoundRobin::<(Tensor, Tensor)>::new(
+            &filenames,
+            RoundRobinOptions {
+                round_robin_size,
+                buffer_size,
+            },
+            reader_create,
+        ) {
+            Ok(reader) => Ok(reader),
+            Err(_e) => Err(PyErr::new::<PyException, _>("Error creating class")),
+        }?;
+
+        let batcher = TensorBatchingIterator {
+            input: Box::new(round_robin.iter()),
+            batch_size,
+        };
+
+        Ok(ParquetToTorchBatchedRoundRobinFloat {
+            batcher: Mutex::new(batcher),
+        })
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<IterNextOutput<(PyTensor, PyTensor, PyTensor), &'static str>> {
+        match py.allow_threads(move || {
+            let mut iter = self.batcher.lock().expect("lock failed");
+            iter.next()
+        }) {
+            None => Ok(IterNextOutput::Return("Ended")),
+            Some(batching_item) => Ok(IterNextOutput::Yield((
+                PyTensor(batching_item.x),
+                PyTensor(batching_item.y),
+                PyTensor(batching_item.mask),
+            ))),
+        }
+    }
 }
 
 #[pymethods]
@@ -192,5 +270,6 @@ fn parquet_lstm_tensor(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     py.import("torch")?;
     m.add_class::<ParquetToTorchSeqReaderFloat>()?;
     m.add_class::<ParquetToTorchSeqRoundRobinFloat>()?;
+    m.add_class::<ParquetToTorchBatchedRoundRobinFloat>()?;
     Ok(())
 }
