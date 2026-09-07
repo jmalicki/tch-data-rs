@@ -1,3 +1,7 @@
+//! Python bindings for Parquet → PyTorch sequence loaders.
+//!
+//! Import as `import tch_data` after building the extension with maturin.
+
 use pyo3::prelude::*;
 use pyo3::pyclass::IterNextOutput;
 use pyo3::{
@@ -7,11 +11,11 @@ use pyo3::{
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-mod batcher;
-mod parquet_tensors;
-mod round_robin;
+pub mod batcher;
+pub mod parquet_tensors;
+pub mod round_robin;
 
-use batcher::{TensorBatchingItem, TensorBatchingIterator};
+use batcher::TensorBatchingIterator;
 use parquet::data_type::DoubleType;
 use tch::Tensor;
 
@@ -31,7 +35,7 @@ impl From<ParquetLSTMTensorError> for pyo3::PyErr {
             IoError(e) => e.into(),
             TryFromIntError(e) => e.into(),
             Tensor(e) => wrap_tch_err(e),
-            other => PyErr::new::<PyException, _>(format!("{}", other)),
+            other => PyErr::new::<PyException, _>(format!("{other}")),
         }
     }
 }
@@ -65,30 +69,65 @@ impl IntoPy<PyObject> for PyTensor {
     }
 }
 
-#[pyclass(module = "parquet_lstm_tensor")]
+#[pyclass(module = "tch_data")]
 struct ParquetToTorchSeqReaderFloat {
     reader: ParquetToTorchSeqReaderImpl<f32, DoubleType>,
 }
 
-#[pyclass(module = "parquet_lstm_tensor")]
+#[pyclass(module = "tch_data")]
 struct ParquetToTorchSeqRoundRobinFloat {
     reader: RoundRobin<(Tensor, Tensor)>,
 }
 
-#[pyclass(module = "parquet_lstm_tensor")]
+#[pyclass(module = "tch_data")]
 struct ParquetToTorchSeqRoundRobinFloatIter {
     iter: Mutex<RoundRobinIterator<(Tensor, Tensor)>>,
 }
 
-#[pyclass(module = "parquet_lstm_tensor")]
+#[pyclass(module = "tch_data")]
 struct ParquetToTorchBatchedRoundRobinFloat {
     round_robin: RoundRobin<(Tensor, Tensor)>,
     batch_size: usize,
 }
 
-#[pyclass(module = "parquet_lstm_tensor")]
+#[pyclass(module = "tch_data")]
 struct ParquetToTorchBatchedRoundRobinFloatIter {
     iter: Mutex<TensorBatchingIterator>,
+}
+
+fn make_round_robin(
+    filenames: &[String],
+    colnames: Vec<String>,
+    round_robin_size: usize,
+    buffer_size: usize,
+    max_seq_len: usize,
+    forward_skips: usize,
+    augment_offset: bool,
+) -> PyResult<RoundRobin<(Tensor, Tensor)>> {
+    let reader_create: Arc<ParquetToTorchSeqReaderFactory<(Tensor, Tensor)>> =
+        Arc::new(move |path: &Path| {
+            Ok(Box::new(
+                ParquetToTorchSeqReaderImpl::<f32, DoubleType>::new(
+                    path,
+                    &colnames,
+                    ParquetLSTMSeqOptions {
+                        max_seq_len,
+                        forward_skips,
+                        augment_offset,
+                    },
+                )?,
+            ))
+        });
+
+    RoundRobin::<(Tensor, Tensor)>::new(
+        filenames,
+        RoundRobinOptions {
+            round_robin_size,
+            buffer_size,
+        },
+        reader_create,
+    )
+    .map_err(|e| PyErr::new::<PyException, _>(format!("failed to create round-robin reader: {e}")))
 }
 
 #[pymethods]
@@ -104,32 +143,15 @@ impl ParquetToTorchBatchedRoundRobinFloat {
         augment_offset: bool,
         batch_size: usize,
     ) -> PyResult<Self> {
-        let reader_create: Arc<ParquetToTorchSeqReaderFactory<(Tensor, Tensor)>> =
-            Arc::new(move |path: &Path| {
-                Ok(Box::new(
-                    ParquetToTorchSeqReaderImpl::<f32, DoubleType>::new(
-                        path,
-                        &colnames,
-                        ParquetLSTMSeqOptions {
-                            max_seq_len,
-                            forward_skips,
-                            augment_offset,
-                        },
-                    )?,
-                ))
-            });
-
-        let round_robin = match RoundRobin::<(Tensor, Tensor)>::new(
+        let round_robin = make_round_robin(
             &filenames,
-            RoundRobinOptions {
-                round_robin_size,
-                buffer_size,
-            },
-            reader_create,
-        ) {
-            Ok(reader) => Ok(reader),
-            Err(_e) => Err(PyErr::new::<PyException, _>("Error creating class")),
-        }?;
+            colnames,
+            round_robin_size,
+            buffer_size,
+            max_seq_len,
+            forward_skips,
+            augment_offset,
+        )?;
 
         Ok(ParquetToTorchBatchedRoundRobinFloat {
             round_robin,
@@ -181,8 +203,8 @@ impl ParquetToTorchSeqReaderFloat {
         forward_skips: usize,
         augment_offset: bool,
     ) -> PyResult<Self> {
-        let path = std::path::Path::new(filename);
-        match ParquetToTorchSeqReaderImpl::<f32, DoubleType>::new(
+        let path = Path::new(filename);
+        let reader = ParquetToTorchSeqReaderImpl::<f32, DoubleType>::new(
             path,
             &colnames,
             ParquetLSTMSeqOptions {
@@ -190,10 +212,8 @@ impl ParquetToTorchSeqReaderFloat {
                 forward_skips,
                 augment_offset,
             },
-        ) {
-            Ok(reader) => Ok(ParquetToTorchSeqReaderFloat { reader }),
-            Err(_e) => Err(PyErr::new::<PyException, _>("Error creating class")),
-        }
+        )?;
+        Ok(ParquetToTorchSeqReaderFloat { reader })
     }
 
     fn read_tensors(
@@ -221,32 +241,16 @@ impl ParquetToTorchSeqRoundRobinFloat {
         forward_skips: usize,
         augment_offset: bool,
     ) -> PyResult<Self> {
-        let reader_create: Arc<ParquetToTorchSeqReaderFactory<(Tensor, Tensor)>> =
-            Arc::new(move |path: &Path| {
-                Ok(Box::new(
-                    ParquetToTorchSeqReaderImpl::<f32, DoubleType>::new(
-                        path,
-                        &colnames,
-                        ParquetLSTMSeqOptions {
-                            max_seq_len,
-                            forward_skips,
-                            augment_offset,
-                        },
-                    )?,
-                ))
-            });
-
-        match RoundRobin::<(Tensor, Tensor)>::new(
+        let reader = make_round_robin(
             &filenames,
-            RoundRobinOptions {
-                round_robin_size,
-                buffer_size,
-            },
-            reader_create,
-        ) {
-            Ok(reader) => Ok(ParquetToTorchSeqRoundRobinFloat { reader }),
-            Err(_e) => Err(PyErr::new::<PyException, _>("Error creating class")),
-        }
+            colnames,
+            round_robin_size,
+            buffer_size,
+            max_seq_len,
+            forward_skips,
+            augment_offset,
+        )?;
+        Ok(ParquetToTorchSeqRoundRobinFloat { reader })
     }
 
     fn __iter__(&self) -> PyResult<ParquetToTorchSeqRoundRobinFloatIter> {
@@ -280,7 +284,7 @@ impl ParquetToTorchSeqRoundRobinFloatIter {
 }
 
 #[pymodule]
-fn parquet_lstm_tensor(py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn tch_data(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     py.import("torch")?;
     m.add_class::<ParquetToTorchSeqReaderFloat>()?;
     m.add_class::<ParquetToTorchSeqRoundRobinFloat>()?;

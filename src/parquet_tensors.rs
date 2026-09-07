@@ -10,11 +10,11 @@ use parquet::{
 };
 use std::cmp::Eq;
 use std::collections::HashMap;
-use std::{fs::File, path::Path, usize};
+use std::{fs::File, path::Path};
 use tch::{TchError, Tensor};
 use thiserror::Error;
 
-// Keep track of iterator over parquet file
+/// Per-row-group cursor over typed column readers.
 struct ParquetToTorchSeqReaderRowGroup<ParquetValType>
 where
     ParquetValType: DataType,
@@ -33,10 +33,13 @@ pub trait ParquetToTorchSeqReader {
     fn eof(&mut self) -> Result<bool>;
 }
 
+/// Options controlling how sequences are sliced from a Parquet file.
 pub struct ParquetLSTMSeqOptions {
     pub max_seq_len: usize,
-    // number of steps to skip between input and prediction
+    /// Number of timesteps between input `x` and prediction target `y`.
     pub forward_skips: usize,
+    /// Reserved: when `true`, randomly offset the first window within a file.
+    /// Not yet implemented — accepted for API stability with the Python bindings.
     pub augment_offset: bool,
 }
 
@@ -56,7 +59,6 @@ where
 impl<ParquetValType: DataType> ParquetToTorchSeqReaderRowGroup<ParquetValType> {
     fn new(row_group_num: usize, num_cols: usize) -> Self {
         ParquetToTorchSeqReaderRowGroup {
-            // row_group: None,
             row_group_num,
             row_group_num_rows: 0,
             row_group_offset: 0,
@@ -90,6 +92,7 @@ pub enum ParquetLSTMTensorError {
 }
 
 pub type Result<T> = core::result::Result<T, ParquetLSTMTensorError>;
+
 pub trait TensorValTypeTrait: tch::kind::Element + Default + NumCast {}
 impl<T> TensorValTypeTrait for T where T: tch::kind::Element + Default + NumCast {}
 
@@ -104,17 +107,9 @@ where
 impl<TensorValType: TensorValTypeTrait, ParquetValType: ParquetValTypeTrait>
     ParquetToTorchSeqReaderImpl<TensorValType, ParquetValType>
 where
-    ParquetValType::T: NumCast + ToPrimitive, // FIXME: why isn't ParquetValTypeTrait working here?
+    ParquetValType::T: NumCast + ToPrimitive,
 {
-    /// Return indices for given column names in parquet file
-    ///
-    /// # Arguments
-    ///
-    /// * `metadata` - Metadata for this parquet file
-    /// * `colnames` - Array of string slices in the order that indices should be returned
-    ///
-    /// # Returns
-    /// List of indices of columns in same order as `colnames`
+    /// Return indices and max definition levels for `colnames` in schema order.
     fn column_indices_and_levels<StrRef: AsRef<str> + Hash + Eq>(
         metadata: &ParquetMetaData,
         colnames: &[StrRef],
@@ -178,13 +173,11 @@ where
 
         let mut last_rows = vec![TensorValType::default(); forward_skips * num_cols];
 
-        // If we couldn't read enough, we will be at eof
         let num_read = res.read_data(&mut last_rows, 0, forward_skips)?;
-        // Have to move the vector so we don't double borrow
         res.last_rows = last_rows;
 
         if num_read < forward_skips && !res.eof()? {
-            panic!("Only read {num_read} values out of {forward_skips}, but eof not triggered, in init!")
+            return Err(ParquetLSTMTensorError::ShortReadError);
         }
 
         Ok(res)
@@ -234,19 +227,20 @@ where
     }
 
     fn advance_row_groups(&mut self) -> Result<()> {
-        // check row group
         while self.iter.row_group_offset == self.iter.row_group_num_rows {
-            panic!("Untested advance_row_groups");
-            if self.iter.row_group_num == self.num_row_groups {
+            // Already past the last group (empty sentinel), or no groups at all.
+            if self.iter.row_group_num >= self.num_row_groups {
                 return Ok(());
             }
 
-            self.iter = Self::next_row_group(
-                &self.reader,
-                self.iter.row_group_num + 1,
-                self.num_row_groups,
-                &self.col_indices,
-            )?;
+            let next = self.iter.row_group_num + 1;
+            self.iter =
+                Self::next_row_group(&self.reader, next, self.num_row_groups, &self.col_indices)?;
+
+            // next_row_group returns an empty sentinel when `next >= num_row_groups`.
+            if next >= self.num_row_groups {
+                return Ok(());
+            }
         }
 
         Ok(())
@@ -280,7 +274,7 @@ where
 
         if num_rows == 0 {
             return Ok(0);
-        } // EOF
+        }
 
         let mut buffer: Vec<ParquetValType::T> = vec![ParquetValType::T::default(); num_rows];
         let mut def_levels: Vec<i16> = vec![0; num_rows];
@@ -301,25 +295,20 @@ where
                     panic!("Expected non nulls ({non_null_read}) to be <= levels ({levels_read})")
                 }
 
-                // Now we copy non-null bytes
+                // def_levels is indexed by row position; buffer only holds non-nulls.
                 let mut src_idx: usize = 0;
                 let max_level = self.max_levels[col_idx];
 
-                // we have a level for every position, but a buffer in src_idx only for non-nulls
                 for dest_idx in 0..levels_read {
-                    if def_levels[src_idx] == max_level {
-                        if src_idx < non_null_read {
-                            // defensive if for later panic
-                            data[(cur_offset + dest_idx) * num_cols + col_idx] =
-                                num::cast(buffer[src_idx].clone()).unwrap()
-                        }
-                        src_idx += 1;
-
-                        if src_idx > non_null_read {
+                    if def_levels[dest_idx] == max_level {
+                        if src_idx >= non_null_read {
                             panic!(
                                 "More non-null values ({src_idx}) than reported read {non_null_read}!"
                             )
                         }
+                        data[(cur_offset + dest_idx) * num_cols + col_idx] =
+                            num::cast(buffer[src_idx].clone()).unwrap();
+                        src_idx += 1;
                     }
                 }
             }
@@ -402,7 +391,7 @@ where
 
     fn eof(&mut self) -> Result<bool> {
         self.advance_row_groups()?;
-        return Ok(self.iter.row_group_num == self.num_row_groups);
+        Ok(self.iter.row_group_num >= self.num_row_groups)
     }
 }
 

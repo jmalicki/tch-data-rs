@@ -1,19 +1,18 @@
-use std::num::TryFromIntError;
-use std::{cmp::max, sync::Arc};
-
 use tch::{kind::Kind, Device, Tensor};
-use thiserror::Error;
 
 use par_map::ParMap;
 
+/// A padded mini-batch of variable-length sequences.
 pub struct TensorBatchingItem {
     pub x: Tensor,
     pub y: Tensor,
+    /// Boolean mask with the same shape as `x` / `y` before padding
+    /// (ones for real timesteps, zeros for pad).
     pub mask: Tensor,
 }
 
 impl TensorBatchingItem {
-    pub fn send_to_device(&self, device: tch::Device, non_blocking: bool) -> TensorBatchingItem {
+    pub fn send_to_device(&self, device: Device, non_blocking: bool) -> TensorBatchingItem {
         TensorBatchingItem {
             x: self
                 .x
@@ -33,35 +32,43 @@ impl TensorBatchingItem {
     }
 }
 
-pub struct TensorBatchingIterator(Box<dyn Iterator<Item = TensorBatchingItem> + Send>);
-
-#[derive(Error, Debug)]
-enum BatchingError {
-    #[error("Empty batch")]
-    EmptyBatch,
-    #[error("Mismatched dimensions")]
-    MismatchedDims,
-    #[error(transparent)]
-    TchError(#[from] tch::TchError),
-    #[error(transparent)]
-    TryFromIntError(#[from] TryFromIntError),
+/// Prefers CUDA device 0 when available, otherwise CPU.
+pub fn default_device() -> Device {
+    if tch::Cuda::is_available() {
+        Device::Cuda(0)
+    } else {
+        Device::Cpu
+    }
 }
+
+pub struct TensorBatchingIterator(Box<dyn Iterator<Item = TensorBatchingItem> + Send>);
 
 impl TensorBatchingIterator {
     pub fn new(
         input: Box<dyn Iterator<Item = (Tensor, Tensor)> + Send>,
         batch_size: usize,
     ) -> Self {
+        Self::new_with_device(input, batch_size, default_device())
+    }
+
+    pub fn new_with_device(
+        input: Box<dyn Iterator<Item = (Tensor, Tensor)> + Send>,
+        batch_size: usize,
+        device: Device,
+    ) -> Self {
         let iter = Box::new(
             input
                 .pack(batch_size)
                 .with_nb_threads(4)
-                .par_map(|batch| Self::batch(batch).send_to_device(tch::Device::Cuda(0), true)),
+                .par_map(move |batch| {
+                    Self::batch(batch).send_to_device(device, device != Device::Cpu)
+                }),
         );
 
         TensorBatchingIterator(iter)
     }
 
+    /// Pad a list of `(x, y)` sequences into a single batch with a boolean mask.
     pub fn batch(batch: Vec<(Tensor, Tensor)>) -> TensorBatchingItem {
         let mut x_tensors = Vec::with_capacity(batch.len());
         let mut y_tensors = Vec::with_capacity(batch.len());

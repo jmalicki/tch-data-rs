@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # Full `cargo check` needs LibTorch. Until CI provisions it, keep a
+  # lightweight gate that still fails on formatting / missing files.
+  # To enable compilation CI later, install LibTorch and run:
+  #   cargo check --no-default-features
+  lint-files:
+    name: required files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check required paths exist
+        run: |
+          test -f README.md
+          test -f LICENSE
+          test -f Cargo.toml
+          test -f pyproject.toml
+          test -f src/lib.rs
+          test -f src/parquet_tensors.rs
+          test -f src/round_robin.rs
+          test -f src/batcher.rs
+          test ! -f src/buffered_iterator.rs
