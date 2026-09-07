@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tch-data"
+version = "0.1.0"
+description = "High-performance Parquet → PyTorch sequence data loaders (Rust / tch-rs)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Joseph Malicki" }]
+keywords = ["pytorch", "parquet", "dataloader", "lstm", "tch"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["torch"]
+
+[project.urls]
+Repository = "https://github.com/jmalicki/tch-data-rs"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "tch_data"

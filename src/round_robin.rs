@@ -15,9 +15,11 @@ enum WorkQueueMessage {
     NewFile(PathBuf),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RoundRobinOptions {
+    /// Number of parallel file readers.
     pub round_robin_size: usize,
+    /// Per-worker channel capacity (prefetch depth).
     pub buffer_size: usize,
 }
 
@@ -51,19 +53,16 @@ where
     reader_create: Arc<ParquetToTorchSeqReaderFactory<Item>>,
 }
 
-impl<'a, Item> RoundRobinWorker<Item>
+impl<Item> RoundRobinWorker<Item>
 where
     Item: Send,
-    RoundRobinError: From<crossbeam_channel::SendError<Option<Item>>>,
 {
-    // Returns Ok(()) on eof, otherwise error
+    /// Returns `Ok(())` on EOF for the current file.
     fn get_tensor_loop(&mut self, reader: &mut dyn Iterator<Item = Item>) -> Result<()> {
         loop {
-            // the select! macro returns a random item if multiple are ready,
-            // so make sure we always respect a stop message
-            match self.control_queue.try_recv() {
-                Ok(ControlMessage::Stop) => return Err(RoundRobinError::StopWorker),
-                _ => (),
+            // Prefer stop messages over producing more items.
+            if matches!(self.control_queue.try_recv(), Ok(ControlMessage::Stop)) {
+                return Err(RoundRobinError::StopWorker);
             }
 
             let item = reader.next();
@@ -96,7 +95,6 @@ where
                 Err(e) => return Err(e),
                 Ok(()) => (),
             };
-            drop(reader);
         }
     }
 
@@ -111,7 +109,6 @@ pub struct RoundRobin<Item> {
     reader_create: Arc<ParquetToTorchSeqReaderFactory<Item>>,
 }
 
-// derive(Clone) did not work
 impl<Item> Clone for RoundRobin<Item> {
     fn clone(&self) -> Self {
         RoundRobin {
@@ -183,25 +180,23 @@ impl<Item> Iterator for RoundRobinIterator<Item> {
 
     fn next(&mut self) -> Option<Item> {
         loop {
-            // check for end of epoch
             if self.item_queues.is_empty() {
                 return None;
             }
 
             match self.item_queues[self.next_queue].recv() {
-                Err(e) => panic!("Error dequeuing tensor: {e}"),
+                Err(e) => panic!("Error dequeuing item: {e}"),
                 Ok(Some(item)) => {
                     self.next_queue += 1;
                     if self.next_queue == self.item_queues.len() {
-                        self.next_queue = 0
+                        self.next_queue = 0;
                     }
                     return Some(item);
                 }
                 Ok(None) => (),
             }
 
-            // EOF for that file, send next file if we have more
-
+            // EOF for that file — schedule the next file if any remain.
             if self.next_file < self.parent.filenames.len() {
                 self.work_queue
                     .send(WorkQueueMessage::NewFile(
@@ -214,23 +209,16 @@ impl<Item> Iterator for RoundRobinIterator<Item> {
                 self.item_queues.remove(self.next_queue);
             }
             if self.next_queue == self.item_queues.len() {
-                self.next_queue = 0
+                self.next_queue = 0;
             }
         }
-    }
-
-    /// leaving this here because we need to make upstreams iterators etc.
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, None)
     }
 }
 
 impl<Item> Drop for RoundRobinIterator<Item> {
     fn drop(&mut self) {
-        for _i in 0..self.round_robin_size {
-            self.control_queue
-                .send(ControlMessage::Stop)
-                .expect("Error sending stop message");
+        for _ in 0..self.round_robin_size {
+            let _ = self.control_queue.send(ControlMessage::Stop);
         }
         self.threadpool.join();
     }
@@ -242,13 +230,11 @@ impl<Item> RoundRobin<Item> {
         options: RoundRobinOptions,
         reader_create: Arc<ParquetToTorchSeqReaderFactory<Item>>,
     ) -> Result<RoundRobin<Item>> {
-        let res = RoundRobin {
-            filenames: filenames.iter().map(|s| PathBuf::from(s)).collect(),
+        Ok(RoundRobin {
+            filenames: filenames.iter().map(PathBuf::from).collect(),
             options,
             reader_create,
-        };
-
-        Ok(res)
+        })
     }
 }
 
