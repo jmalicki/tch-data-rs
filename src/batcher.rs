@@ -83,9 +83,9 @@ impl TensorBatchingIterator {
         }
 
         TensorBatchingItem {
-            x: Tensor::pad_sequence(&x_tensors, true, 0.0),
-            y: Tensor::pad_sequence(&y_tensors, true, 0.0),
-            mask: Tensor::pad_sequence(&mask_tensors, true, 0.0),
+            x: Tensor::pad_sequence(&x_tensors, true, 0.0, "right"),
+            y: Tensor::pad_sequence(&y_tensors, true, 0.0, "right"),
+            mask: Tensor::pad_sequence(&mask_tensors, true, 0.0, "right"),
         }
     }
 }

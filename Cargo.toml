@@ -1,6 +1,6 @@
 [package]
 name = "tch-data"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "High-performance Parquet → PyTorch sequence data loaders (tch-rs / PyO3), inspired by torchdata"
 license = "MIT"
@@ -8,7 +8,7 @@ repository = "https://github.com/jmalicki/tch-data-rs"
 readme = "README.md"
 keywords = ["pytorch", "tch", "parquet", "dataloader", "lstm"]
 categories = ["science", "asynchronous"]
-rust-version = "1.70"
+rust-version = "1.82"
 
 [lib]
 name = "tch_data"
@@ -18,17 +18,22 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 num = "0.4"
-parquet = "40"
-pyo3 = { version = "0.18" }
-tch = { version = "0.13.0", features = ["python-extension"] }
-thiserror = "1.0"
+parquet = "59"
+thiserror = "2"
 crossbeam-channel = "0.5"
 threadpool = "1.8"
 par-map = "0.1"
+tch = { version = "0.26.0" }
+
+# Python extension (optional so the core Rust library can build without libpython)
+pyo3 = { version = "0.24", optional = true }
+pyo3-tch = { version = "0.26.0", optional = true }
 
 [features]
-# Enable when building the Python extension (maturin / setuptools-rust).
-# Disable for plain `cargo test` / Rust-only use so the linker does not
-# require a Python shared library.
-extension-module = ["pyo3/extension-module"]
-default = ["extension-module"]
+default = ["python"]
+# Enable the `tch_data` Python module (maturin / PyO3).
+python = ["dep:pyo3", "dep:pyo3-tch", "tch/python-extension"]
+# Link as a CPython extension module (required for `maturin develop` / wheels).
+extension-module = ["python", "pyo3/extension-module"]
+# Convenience for local/CI builds without a system LibTorch install.
+download-libtorch = ["tch/download-libtorch"]

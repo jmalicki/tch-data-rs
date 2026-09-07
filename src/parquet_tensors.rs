@@ -276,13 +276,17 @@ where
             return Ok(0);
         }
 
-        let mut buffer: Vec<ParquetValType::T> = vec![ParquetValType::T::default(); num_rows];
-        let mut def_levels: Vec<i16> = vec![0; num_rows];
-        let mut rep_levels: Vec<i16> = vec![0; num_rows];
+        let mut buffer: Vec<ParquetValType::T> = Vec::with_capacity(num_rows);
+        let mut def_levels: Vec<i16> = Vec::with_capacity(num_rows);
+        let mut rep_levels: Vec<i16> = Vec::with_capacity(num_rows);
 
         for (col_idx, col_reader) in self.iter.col_readers.iter_mut().enumerate() {
             if let Some(reader) = col_reader.as_mut() {
-                let (non_null_read, levels_read) = reader.read_batch(
+                buffer.clear();
+                def_levels.clear();
+                rep_levels.clear();
+
+                let (_records_read, non_null_read, levels_read) = reader.read_records(
                     num_rows,
                     Some(&mut def_levels),
                     Some(&mut rep_levels),
@@ -295,20 +299,27 @@ where
                     panic!("Expected non nulls ({non_null_read}) to be <= levels ({levels_read})")
                 }
 
-                // def_levels is indexed by row position; buffer only holds non-nulls.
-                let mut src_idx: usize = 0;
                 let max_level = self.max_levels[col_idx];
-
-                for dest_idx in 0..levels_read {
-                    if def_levels[dest_idx] == max_level {
-                        if src_idx >= non_null_read {
-                            panic!(
-                                "More non-null values ({src_idx}) than reported read {non_null_read}!"
-                            )
-                        }
+                if max_level == 0 {
+                    // Required column: every level is a value.
+                    for dest_idx in 0..levels_read {
                         data[(cur_offset + dest_idx) * num_cols + col_idx] =
-                            num::cast(buffer[src_idx].clone()).unwrap();
-                        src_idx += 1;
+                            num::cast(buffer[dest_idx].clone()).unwrap();
+                    }
+                } else {
+                    // def_levels is indexed by row position; buffer only holds non-nulls.
+                    let mut src_idx: usize = 0;
+                    for dest_idx in 0..levels_read {
+                        if def_levels[dest_idx] == max_level {
+                            if src_idx >= non_null_read {
+                                panic!(
+                                    "More non-null values ({src_idx}) than reported read {non_null_read}!"
+                                )
+                            }
+                            data[(cur_offset + dest_idx) * num_cols + col_idx] =
+                                num::cast(buffer[src_idx].clone()).unwrap();
+                            src_idx += 1;
+                        }
                     }
                 }
             }
